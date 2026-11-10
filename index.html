@@ -866,6 +866,7 @@ addEventListener("keydown", (e) => {
 // ── MAIN LOOP ───────────────────────────────────────────────────────────────────────
 let lastHb = 0, lastHud = 0, last = 0;
 function frame() {
+  requestAnimationFrame(frame);
   const t = performance.now(), dt = Math.max(0, Math.min(0.05, (t - (last || t)) / 1000));
   last = t;
   if (t - lastHb > 1000) { lastHb = t; net.me.set("hb", Date.now()); fixColor(); }
@@ -874,7 +875,6 @@ function frame() {
   if (m) myTick(m, t, dt);
   draw(m, t, dt);
   if (t - lastHud > 150) { lastHud = t; hud(m); }
-  requestAnimationFrame(frame);
 }
 
 (async function start() {
