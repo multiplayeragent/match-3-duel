@@ -1,0 +1,900 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Match-3 Duel</title>
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; overscroll-behavior: none; background: #0c0a1d; }
+  body { font: 15px/1.4 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; color: #f3efff; user-select: none; -webkit-user-select: none; }
+  canvas { display: block; width: 100vw; height: 100vh; height: 100dvh; touch-action: none; }
+  [hidden] { display: none !important; }
+  .hud { position: fixed; pointer-events: none; text-shadow: 0 1px 3px #000a; }
+  #net { bottom: max(10px, env(safe-area-inset-bottom)); left: max(12px, env(safe-area-inset-left)); font-size: 12px; opacity: .7; }
+  #hint { right: max(16px, env(safe-area-inset-right)); bottom: max(12px, env(safe-area-inset-bottom)); text-align: right; font-size: 13px; opacity: .85; max-width: 46vw; }
+  @media (max-aspect-ratio: 1/1) { #hint { left: 0; right: 0; max-width: none; text-align: center; bottom: max(30px, calc(env(safe-area-inset-bottom) + 24px)); padding: 0 12px; } }
+  #over { position: fixed; inset: 0; display: grid; place-items: center; background: #0c0a1dc0; padding: 16px; }
+  .card { width: min(380px, calc(100vw - 32px)); max-height: 92vh; overflow: auto; box-sizing: border-box; padding: 20px; border-radius: 18px; background: #1e1840; border: 1px solid #ffffff22; text-align: center; box-shadow: 0 20px 60px #0009; }
+  .card h2 { margin: 0 0 6px; font-size: 26px; }
+  .card h3 { margin: 12px 0 0; font-size: 12px; letter-spacing: .1em; color: #a99fd6; }
+  .card ol { text-align: left; margin: 8px 0; padding-left: 26px; font-size: 14px; } .card li span { float: right; } .card li.me { color: #ffd23f; font-weight: 700; }
+  button.go { width: 100%; min-height: 48px; border: 0; border-radius: 12px; background: #ffd23f; color: #1e1840; font: 800 17px system-ui, sans-serif; cursor: pointer; margin-top: 8px; }
+  #oNext { color: #a99fd6; font-size: 13px; margin-top: 8px; }
+</style>
+<script src="https://cdn.multiplayeragent.com/sdk/mp.global.js"></script>
+</head>
+<body>
+<canvas id="game"></canvas>
+<div id="safe" style="position:fixed;top:0;height:0;padding-top:env(safe-area-inset-top);pointer-events:none"></div>
+<div class="hud" id="hint"></div>
+<div class="hud" id="net">Connecting…</div>
+<div id="over" hidden><div class="card">
+  <h2 id="oTitle"></h2><ol id="places"></ol>
+  <h3>BEST SCORE IN ONE MATCH</h3><ol id="board"><li>Loading the leaderboard…</li></ol>
+  <button class="go" id="again">Play again</button><div id="oNext"></div>
+</div></div>
+<script>
+/* ═══ MATCH-3 DUEL · a Multiplayer Agent starter ═════════════════════════════════════════
+ * Swap gems to match 3. Chains and big matches drop stones on your rivals. Versus, 2–4
+ * players; bots fill empty seats. The stack rises from below: a full board loses.
+ *
+ * WHERE THINGS ARE (search for the "── " headers):
+ *   CONFIG ........ board size, rising speed, stones per chain, bots
+ *   GEMS .......... the gem kinds: color and shape
+ *   CONNECTION .... MP_CONNECT, joining, the offline room, who is host
+ *   BOARD ......... one board's rules: swapping, matching, falling, chains, rising rows, stones
+ *   MATCH (HOST) .. countdown, who is out, the winner, the restart, sending stones
+ *   BOTS (HOST) ... a bot tries every swap and plays one of the best
+ *   ME ............ my board: ticking, my swaps, publishing
+ *   RIVALS ........ other players' boards rebuilt from their snapshots, with smooth falls
+ *   DRAW .......... gem pictures, boards (mine large, rivals small), effects
+ *   SCREENS ....... sound, hint, results, leaderboard, colors
+ *   INPUT ......... drag or tap two gems, keyboard cursor
+ *   MAIN LOOP ..... heartbeat, host tick, my tick, draw
+ *
+ * HOW THE MULTIPLAYER WORKS (a relay room: no server code):
+ *   - Each player's board is its OWN entity field `b` = {m, g, n, r, a, s, j, q, c, k, u}:
+ *     match id, the 70 cells as one string ("." empty, a–f a gem, "#" a stone, a capital
+ *     letter = matched and about to pop), the next row, how far the stack has risen (0–1),
+ *     alive, score, stones sent, stones waiting, chain, rows risen, cursor. Also `n` (name),
+ *     `c` (color) and `hb` (heartbeat).
+ *   - The HOST (lowest live sessionId) runs the match in ONE shared field, `match`: {id, v,
+ *     ph, seed, startAt, players, bots, out, winner, endsAt, ready}. It reads every board,
+ *     marks who is out and calls the winner. Bots' boards live in the shared field `bots`.
+ *   - Chains and big matches send stones with a "junk" event {to, n, m, f}. The victim
+ *     drops them onto its OWN board a moment later; stones you send first cancel them.
+ *   - Everyone starts from the same board, and rising rows come from match.seed.
+ *   - ?attract plays offline with bots only (the preview video is recorded from it).
+ *   - Leaderboard "best-score": each player's best match.
+ */
+
+// ── CONFIG ──────────────────────────────────────────────────────────────────────────
+const CONFIG = {
+  seats: 4,             // bots fill the match up to this many boards (2–4)
+  cols: 7, rows: 10,    // board size in cells
+  kinds: 5,             // how many gem kinds are in play (3–6; more is harder)
+  startRows: 4,         // rows of gems on the board at the start
+  riseMs: 5500,         // the stack rises one row this often at the start…
+  speedUpEvery: 15000,  // …and gets faster every 15 seconds…
+  speedUp: 0.86,        // …by this factor…
+  minRiseMs: 1300,      // …down to this
+  graceMs: 1600,        // a stack touching the top survives this long before it's out
+  swapMs: 90,           // a swap slides this long
+  clearMs: 380,         // matched gems flash this long, then pop
+  fallMs: 60,           // falling speed (ms per row, roughly)
+  junkPerChain: 3,      // stones sent per chain step after the first (chain ×2 = 3, ×3 = 6)
+  junkPerExtra: 1,      // stones sent per gem beyond 3 popped at once
+  junkDelayMs: 1600,    // stones wait this long above a board before they drop
+  maxJunk: 14,          // at most this many stones drop at once (two rows)
+  points: 10,           // points per gem, times the chain
+  countdownMs: 3000,    // 3, 2, 1, go
+  overMs: 9000,         // the results screen
+  botThinkMs: 1200,     // a bot makes a move about this often (lower is faster)
+  botAimMs: 260,        // its cursor rests on the gem this long before it swaps
+  botMistake: 0.3,      // chance a bot plays a weaker move
+  board: "best-score",  // leaderboard name
+};
+const BOT_NAMES = ["Gemma", "Rubix", "Sparkle", "Jewel Bot", "Facet", "Glint", "Opal", "Cascade"];
+const COLORS = ["#ffd23f", "#4cc9f0", "#f72585", "#80ed99", "#ff9f1c", "#b388ff", "#ff6b6b", "#00f5d4"];
+
+// ── GEMS ────────────────────────────────────────────────────────────────────────────
+// Each gem kind is a letter on the wire. A different shape per color keeps them readable.
+const GEMS = {
+  a: { color: "#ff4d6d", dark: "#9c1238", shape: "circle" },
+  b: { color: "#ffbe3d", dark: "#a55f00", shape: "square" },
+  c: { color: "#3ddc84", dark: "#0f7a45", shape: "triangle" },
+  d: { color: "#4cc9f0", dark: "#155e9e", shape: "diamond" },
+  e: { color: "#b98cff", dark: "#5428a8", shape: "hexagon" },
+  f: { color: "#ff8fd8", dark: "#a72f78", shape: "star" },
+};
+const gemKinds = () => Object.keys(GEMS).slice(0, Math.max(3, Math.min(6, CONFIG.kinds)));
+const isGem = (ch) => ch >= "a" && ch <= "f";
+const isPopping = (ch) => ch >= "A" && ch <= "F";
+
+// ── CONNECTION ──────────────────────────────────────────────────────────────────────
+// The builder fills these in for this game. Downloaded from GitHub? Put your own pk_ key here.
+const MP_CONNECT = {
+  key: 'pk_REPLACE_ME',
+  room: 'match-3-duel',
+  endpoint: 'wss://live.multiplayeragent.com',
+  apiUrl: 'https://api.multiplayeragent.com',
+};
+const ATTRACT = new URLSearchParams(location.search).has("attract");
+
+/** Same shape as the SDK client, kept in this tab: offline play and ?attract. */
+function localRoom() {
+  const id = "local", state = { entities: { players: { [id]: {} } }, shared: {} }, subs = [];
+  let queued = false;
+  const emit = () => { if (!queued) { queued = true; queueMicrotask(() => { queued = false; subs.forEach((f) => f(state)); }); } };
+  const put = (o, k, v) => { if (typeof k === "object") Object.assign(o, k); else o[k] = v; emit(); };
+  return {
+    sessionId: id, state, offline: true,
+    me: { set: (k, v) => put(state.entities.players[id], k, v) },
+    setShared: (k, v) => put(state.shared, k, v),
+    onState: (f) => { subs.push(f); f(state); }, onJoin() {}, onLeave() {}, on() {}, send() {},
+    onDisconnect() {}, onReconnect() {}, leave: async () => {},
+  };
+}
+async function connect() {
+  if (ATTRACT || typeof MP === "undefined") return localRoom();
+  try {
+    const mp = await Promise.race([MP.join({ ...MP_CONNECT }), new Promise((_, no) => setTimeout(() => no(new Error("timed out")), 10000))]);
+    window.mp = mp; // the builder calls window.mp.leave() when the page closes
+    return mp;
+  } catch (e) {
+    console.warn("Playing offline:", e && e.message);
+    return localRoom();
+  }
+}
+const parse = (v, fb) => { if (typeof v !== "string") return fb; try { return JSON.parse(v); } catch { return fb; } };
+const memo = new Map();
+/** A JSON field (shared or a player's), parsed once per change. Read-only. */
+function cached(key, raw, fb) { const m = memo.get(key); if (m && m.raw === raw) return m.v; const v = parse(raw, fb); memo.set(key, { raw, v }); return v; }
+let net = null, S = { entities: { players: {} }, shared: {} };
+const seenHb = new Map();
+function livePlayers() {
+  const now = performance.now(), out = [];
+  for (const [id, p] of Object.entries(S.entities.players || {})) {
+    const s = seenHb.get(id);
+    if (!s || s.hb !== p.hb) seenHb.set(id, { hb: p.hb, at: now });
+    if (id === net.sessionId || now - seenHb.get(id).at < 3000) out.push(id);
+  }
+  return out.sort();
+}
+const isHost = () => livePlayers()[0] === net.sessionId;
+const humans = () => livePlayers().filter((id) => !(ATTRACT && id === net.sessionId));
+
+// ── BOARD ───────────────────────────────────────────────────────────────────────────
+// grid[row][col]: row 0 is the top. "." empty, "a"–"f" a gem, "#" a stone, "A"–"F" popping.
+// mv[row][col] is that cell's animation: it slides in from (ox, oy) cells away, or pops in.
+function mulberry32(a) { return () => { a |= 0; a = (a + 0x6d2b79f5) | 0; let t = Math.imul(a ^ (a >>> 15), 1 | a); t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t; return ((t ^ (t >>> 14)) >>> 0) / 4294967296; }; }
+const emptyRow = () => Array(CONFIG.cols).fill(".");
+const emptyGrid = () => Array.from({ length: CONFIG.rows }, emptyRow);
+const noMoves = () => Array.from({ length: CONFIG.rows }, () => Array(CONFIG.cols).fill(null));
+/** Row number k of the stack, from the match seed. It never makes a match with its two neighbors. */
+function makeRow(seed, k, near1, near2) {
+  const rnd = mulberry32((seed ^ Math.imul(k + 1000, 0x9e3779b1)) >>> 0), kinds = gemKinds(), row = [];
+  for (let c = 0; c < CONFIG.cols; c++) {
+    let g, tries = 0;
+    do g = kinds[Math.floor(rnd() * kinds.length)];
+    while (tries++ < 30 && ((c >= 2 && row[c - 1] === g && row[c - 2] === g) || (near1 && near2 && near1[c] === g && near2[c] === g)));
+    row.push(g);
+  }
+  return row;
+}
+function newBoard(seed) {
+  const R = CONFIG.rows, B = { seed, grid: emptyGrid(), mv: noMoves(), phase: "idle", t: 0, chain: 0, rise: 0, grace: 0, k: 0, next: null, alive: true, score: 0, sent: 0, pending: [], cur: null };
+  const rnd = mulberry32(seed), n = Math.min(R - 2, CONFIG.startRows + 1);
+  for (let i = 0; i < n; i++) B.grid[R - 1 - i] = makeRow(seed, -1 - i, B.grid[R - i], B.grid[R + 1 - i]);
+  for (let c = 0; c < CONFIG.cols; c++) { // uneven tops, the same for everyone
+    const h = CONFIG.startRows - 1 + Math.floor(rnd() * 3);
+    for (let r = 0; r < R - h; r++) B.grid[r][c] = ".";
+  }
+  B.next = makeRow(seed, 0, B.grid[R - 1], B.grid[R - 2]);
+  return B;
+}
+/** Gems and gaps slide sideways; up and down only gem with gem. Stones never move. */
+function canSwap(B, r, c, r2, c2) {
+  if (!B.alive || B.phase !== "idle" || r2 < 0 || c2 < 0 || r2 >= CONFIG.rows || c2 >= CONFIG.cols || r < 0 || c < 0) return false;
+  const a = B.grid[r][c], b = B.grid[r2][c2];
+  if (a === "#" || b === "#" || (a === "." && b === ".")) return false;
+  return r === r2 || (a !== "." && b !== ".");
+}
+function swap(B, r, c, r2, c2, now) {
+  if (!canSwap(B, r, c, r2, c2)) return false;
+  [B.grid[r][c], B.grid[r2][c2]] = [B.grid[r2][c2], B.grid[r][c]];
+  B.mv[r][c] = { ox: c2 - c, oy: r2 - r, t0: now, dur: CONFIG.swapMs };
+  B.mv[r2][c2] = { ox: c - c2, oy: r - r2, t0: now, dur: CONFIG.swapMs };
+  B.phase = "settle"; B.t = now + CONFIG.swapMs;
+  return true;
+}
+/** Drop everything into the gaps below it. Returns how long the longest fall takes (0 = nothing moved). */
+function gravity(B, now) {
+  let longest = 0;
+  for (let c = 0; c < CONFIG.cols; c++) {
+    for (let r = CONFIG.rows - 1, to = CONFIG.rows - 1; r >= 0; r--) {
+      const ch = B.grid[r][c];
+      if (ch === ".") continue;
+      if (r !== to) {
+        const d = to - r, dur = CONFIG.fallMs * (1 + Math.sqrt(d) * 1.5);
+        B.grid[to][c] = ch; B.grid[r][c] = "."; B.mv[to][c] = { ox: 0, oy: -d, t0: now, dur, fall: true }; B.mv[r][c] = null;
+        longest = Math.max(longest, dur);
+      }
+      to--;
+    }
+  }
+  return longest;
+}
+/** Every cell in a line of 3+ same gems, across or down, as row * cols + col. */
+function findMatches(g) {
+  const C = CONFIG.cols, R = CONFIG.rows, hit = new Set();
+  for (let r = 0; r < R; r++) for (let c = 0; c < C; c++) {
+    const ch = g[r][c];
+    if (!isGem(ch)) continue;
+    if (c + 2 < C && g[r][c + 1] === ch && g[r][c + 2] === ch) for (let k = c; k < C && g[r][k] === ch; k++) hit.add(r * C + k);
+    if (r + 2 < R && g[r + 1][c] === ch && g[r + 2][c] === ch) for (let k = r; k < R && g[k][c] === ch; k++) hit.add(k * C + c);
+  }
+  return [...hit];
+}
+const topFull = (B) => B.grid[0].some((ch) => ch !== ".");
+/**
+ * One board's rules, every frame. Phases: "idle" (you can swap; the stack rises; stones
+ * drop) → "settle" (wait for slides, then fall, then look for matches) → "clear" (matched
+ * gems flash, then pop) → "settle" again: each new match in a row is one more chain step.
+ * Returns what happened (for sounds, effects and sending stones), or null.
+ */
+function stepBoard(B, now, dt, riseMs) {
+  if (!B.alive) return null;
+  if (B.phase === "settle") {
+    if (now < B.t) return null;
+    const fall = gravity(B, now);
+    if (fall) { B.t = now + fall; return null; }
+    const hit = findMatches(B.grid);
+    if (!hit.length) { B.phase = "idle"; B.chain = 0; return null; }
+    B.chain++;
+    for (const i of hit) { const r = Math.floor(i / CONFIG.cols), c = i % CONFIG.cols; B.grid[r][c] = B.grid[r][c].toUpperCase(); }
+    B.phase = "clear"; B.t = now + CONFIG.clearMs;
+    return { matched: hit.length, chain: B.chain };
+  }
+  if (B.phase === "clear") return now >= B.t ? popMatched(B, now) : null;
+  if (B.pending.length && now >= B.pending[0].at) return dropStones(B, now);
+  if (B.rise >= 1 && topFull(B)) { // touching the top: clear something fast
+    B.grace += dt * 1000;
+    if (B.grace >= CONFIG.graceMs) { B.alive = false; return { ko: true }; }
+    return null;
+  }
+  B.grace = 0;
+  B.rise += (dt * 1000) / riseMs;
+  if (B.rise >= 1 && !topFull(B)) { B.rise -= 1; riseRow(B); B.phase = "settle"; B.t = now; }
+  return null;
+}
+/** The next row comes up from below: everything moves up one. */
+function riseRow(B) {
+  B.grid.shift(); B.grid.push(B.next);
+  B.mv.shift(); B.mv.push(Array(CONFIG.cols).fill(null));
+  B.k++;
+  B.next = makeRow(B.seed, B.k, B.grid[CONFIG.rows - 1], B.grid[CONFIG.rows - 2]);
+  if (B.cur) B.cur = [Math.max(0, B.cur[0] - 1), B.cur[1]];
+}
+/** Pop the flashing gems, crack the stones next to them into gems, score, and work out the stones to send. */
+function popMatched(B, now) {
+  const popped = [], kinds = gemKinds();
+  for (let r = 0; r < CONFIG.rows; r++) for (let c = 0; c < CONFIG.cols; c++) if (isPopping(B.grid[r][c])) { popped.push([r, c, B.grid[r][c].toLowerCase()]); B.grid[r][c] = "."; B.mv[r][c] = null; }
+  for (const [r, c] of popped) for (const [dr, dc] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+    if (B.grid[r + dr]?.[c + dc] !== "#") continue;
+    B.grid[r + dr][c + dc] = kinds[Math.floor(Math.random() * kinds.length)];
+    B.mv[r + dr][c + dc] = { pop: true, t0: now, dur: 240 };
+  }
+  B.score += popped.length * CONFIG.points * B.chain;
+  const send = Math.max(0, popped.length - 3) * CONFIG.junkPerExtra + (B.chain - 1) * CONFIG.junkPerChain;
+  B.phase = "settle"; B.t = now;
+  return { popped, count: popped.length, chain: B.chain, send };
+}
+/** Stones that are due fall onto the tops of the columns, spread out. No room = the board is full = out. */
+function dropStones(B, now) {
+  let n = 0;
+  while (B.pending.length && now >= B.pending[0].at && n < CONFIG.maxJunk) { const p = B.pending[0], k = Math.min(p.n, CONFIG.maxJunk - n); n += k; p.n -= k; if (!p.n) B.pending.shift(); }
+  const tops = Array.from({ length: CONFIG.cols }, (_, c) => { let r = 0; while (r < CONFIG.rows && B.grid[r][c] === ".") r++; return r; });
+  let c = Math.floor(Math.random() * CONFIG.cols), longest = 0;
+  for (let i = 0; i < n; i++) {
+    let tries = 0;
+    while (tops[c] === 0 && tries++ < CONFIG.cols) c = (c + 1) % CONFIG.cols;
+    if (tops[c] === 0) { B.alive = false; return { ko: true, junk: n }; }
+    const r = --tops[c], delay = i * 25, dur = CONFIG.fallMs * (1 + Math.sqrt(r + 2) * 1.5);
+    B.grid[r][c] = "#"; B.mv[r][c] = { ox: 0, oy: -(r + 2), t0: now + delay, dur, fall: true };
+    longest = Math.max(longest, delay + dur);
+    c = (c + 1) % CONFIG.cols;
+  }
+  B.phase = "settle"; B.t = now + longest;
+  return { junk: n };
+}
+const waiting = (B) => B.pending.reduce((a, p) => a + p.n, 0);
+/** A board as it goes on the wire: one short JSON string. */
+const packBoard = (B, m, cur = B.cur) => JSON.stringify({ m, g: B.grid.map((row) => row.join("")).join(""), n: B.next.join(""), r: Math.round(B.rise * 100) / 100, a: B.alive ? 1 : 0, s: B.score, j: B.sent, q: waiting(B), c: B.chain, k: B.k, u: cur || 0 });
+const unpackGrid = (str) => Array.from({ length: CONFIG.rows }, (_, r) => [...String(str || "").slice(r * CONFIG.cols, (r + 1) * CONFIG.cols).padEnd(CONFIG.cols, ".")]);
+const riseMsAt = (m) => Math.max(CONFIG.minRiseMs, CONFIG.riseMs * CONFIG.speedUp ** Math.floor(Math.max(0, Date.now() - m.startAt) / CONFIG.speedUpEvery));
+
+// ── MATCH (HOST) ────────────────────────────────────────────────────────────────────
+const host = { last: null, was: false, bots: new Map(), botsRaw: "", lastBots: 0 };
+function match() {
+  const m = cached("match", S.shared.match, null);
+  return host.last && isHost() && (!m || host.last.v > m.v) ? host.last : m;
+}
+function writeMatch(m) { m = { ...m, v: (match()?.v ?? 0) + 1 }; host.last = m; net.setShared("match", JSON.stringify(m)); return m; }
+const nameOf = (m, id) => (id === net.sessionId ? myName : m?.bots.find((b) => b.i === id)?.n) || String(S.entities.players?.[id]?.n ?? "Player").slice(0, 12);
+const colorOf = (m, id) => (id === net.sessionId ? myColor : m?.bots.find((b) => b.i === id)?.c) || S.entities.players?.[id]?.c || "#aaa";
+const isBot = (m, id) => !!m && m.bots.some((b) => b.i === id);
+const newBot = (B) => ({ B, plan: null, nextAt: 0, mistake: CONFIG.botMistake });
+
+function newMatch(id) {
+  const hs = humans().slice(0, CONFIG.seats), used = new Set(hs.map((h) => colorOf(null, h))), free = COLORS.filter((c) => !used.has(c)), names = [...BOT_NAMES].sort(() => Math.random() - 0.5);
+  const bots = Array.from({ length: Math.max(hs.length ? 0 : 1, CONFIG.seats - hs.length) }, (_, k) => ({ i: "bot" + (k + 1), n: names[k], c: free[k % free.length] }));
+  const seed = (Math.random() * 1e9) | 0;
+  host.bots = new Map(bots.map((b) => [b.i, newBot(newBoard(seed))]));
+  return { id, ph: "count", seed, startAt: Date.now() + CONFIG.countdownMs, players: [...hs, ...bots.map((b) => b.i)], bots, out: [], winner: "", endsAt: 0, ready: [] };
+}
+/** Become host: take the bots' boards over exactly as state has them. */
+function adopt() {
+  host.was = true; host.last = null; host.bots = new Map();
+  const m = match();
+  if (!m) return;
+  for (const v of cached("bots", S.shared.bots, [])) if (v.m === m.id) host.bots.set(v.i, newBot(boardFromView(v, m.seed)));
+  for (const b of m.bots) if (!host.bots.has(b.i)) host.bots.set(b.i, newBot(newBoard(m.seed)));
+}
+function boardFromView(v, seed) {
+  const B = newBoard(seed), now = performance.now();
+  B.grid = unpackGrid(v.g);
+  B.next = [...String(v.n || "")].length === CONFIG.cols ? [...v.n] : B.next;
+  Object.assign(B, { rise: Math.min(1, +v.r || 0), k: v.k || 0, alive: !!v.a, score: v.s || 0, sent: v.j || 0, chain: v.c || 0, pending: v.q ? [{ n: v.q, at: now + CONFIG.junkDelayMs }] : [] });
+  B.phase = B.grid.some((row) => row.some(isPopping)) ? "clear" : "settle"; B.t = now + 100; // finish whatever it was doing
+  return B;
+}
+function hostTick(nowMs, t, dt) {
+  if (!host.was) adopt();
+  let m = match();
+  if (!m) m = writeMatch(newMatch(1));
+  if (m.ph === "count" && nowMs >= m.startAt) m = writeMatch({ ...m, ph: "play" });
+  if (m.ph === "play") { botsTick(m, t, dt); checkOuts(match(), nowMs); }
+  else if (m.ph === "over" && nowMs >= m.endsAt) writeMatch(newMatch(m.id + 1));
+  writeBots();
+}
+function scoreOf(m, id) {
+  if (isBot(m, id)) return host.bots.get(id)?.B.score || 0;
+  if (id === net.sessionId) return me.B && me.m === m.id ? me.B.score : 0;
+  const b = cached("b:" + id, S.entities.players?.[id]?.b, null);
+  return b && b.m === m.id ? b.s || 0 : 0;
+}
+function stillIn(m, id, live) {
+  if (isBot(m, id)) return !!host.bots.get(id)?.B.alive;
+  if (id === net.sessionId) return !(me.B && me.m === m.id && !me.B.alive);
+  const b = cached("b:" + id, S.entities.players?.[id]?.b, null);
+  return live.has(id) && !(b && b.m === m.id && !b.a); // left, frozen (no heartbeat for 3s) or topped out
+}
+/** Who is out. The last board standing wins; when every human is out, the best bot left wins; none left is a draw. */
+function checkOuts(m, nowMs) {
+  const live = new Set(livePlayers()), gone = m.players.filter((id) => !m.out.includes(id) && !stillIn(m, id, live));
+  if (!gone.length) return;
+  const out = [...m.out, ...gone], alive = m.players.filter((id) => !out.includes(id));
+  const hadHumans = m.players.some((id) => !isBot(m, id)), humansIn = alive.some((id) => !isBot(m, id));
+  if (alive.length <= (m.players.length > 1 ? 1 : 0) || (hadHumans && !humansIn)) {
+    const winner = alive.length ? alive.reduce((a, b) => (scoreOf(m, b) > scoreOf(m, a) ? b : a)) : "";
+    writeMatch({ ...m, out, ph: "over", winner, endsAt: nowMs + CONFIG.overMs, ready: [] });
+  } else writeMatch({ ...m, out });
+}
+function onReady(from) {
+  const m = match();
+  if (!m || m.ph !== "over" || m.ready.includes(from)) return;
+  const ready = [...m.ready, from];
+  writeMatch({ ...m, ready, endsAt: humans().every((id) => ready.includes(id)) ? Math.min(m.endsAt, Date.now() + 1200) : m.endsAt });
+}
+/** Send stones to a random rival who is still in. Everyone sees them fly; only the target's owner adds them. */
+function attack(m, from, n) {
+  const rivals = m.players.filter((id) => id !== from && !m.out.includes(id));
+  if (!rivals.length || n <= 0) return;
+  let to = rivals[Math.floor(Math.random() * rivals.length)];
+  if (ATTRACT && rivals.includes("bot1") && Math.random() < 0.5) to = "bot1"; // the preview's big board gets more stones
+  fx.attacks.push({ from, to, n, at: performance.now() });
+  receiveStones(m, to, n);
+  net.send("junk", { to, n, m: m.id, f: from });
+}
+/** Stones for my board, or (as host) a bot's. They wait above it for junkDelayMs. */
+function receiveStones(m, to, n) {
+  const B = to === net.sessionId ? (me.m === m.id ? me.B : null) : isHost() ? host.bots.get(to)?.B : null;
+  if (!B || !B.alive) return;
+  B.pending.push({ n, at: performance.now() + CONFIG.junkDelayMs });
+  if (to === net.sessionId) tone(150, 220, "sawtooth", 0.04);
+}
+
+// ── BOTS (HOST) ─────────────────────────────────────────────────────────────────────
+const topRow = (g) => { for (let r = 0; r < g.length; r++) if (g[r].some((ch) => ch !== ".")) return r; return g.length; };
+function settleGrid(g) {
+  for (let c = 0; c < CONFIG.cols; c++) for (let r = CONFIG.rows - 1, to = CONFIG.rows - 1; r >= 0; r--) if (g[r][c] !== ".") { const ch = g[r][c]; g[r][c] = "."; g[to--][c] = ch; }
+}
+/** Play a swap out on a copy: how many gems pop, how long the chain runs, how low the stack ends. */
+function simulate(g0, r, c, r2, c2) {
+  const g = g0.map((row) => row.slice());
+  [g[r][c], g[r2][c2]] = [g[r2][c2], g[r][c]];
+  let cleared = 0, chain = 0;
+  for (;;) {
+    settleGrid(g);
+    const hit = findMatches(g);
+    if (!hit.length) break;
+    chain++; cleared += hit.length;
+    for (const i of hit) {
+      const y = Math.floor(i / CONFIG.cols), x = i % CONFIG.cols;
+      g[y][x] = ".";
+      for (const [dy, dx] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) if (g[y + dy]?.[x + dx] === "#") g[y + dy][x + dx] = "?"; // a cracked stone: some gem
+    }
+  }
+  return { cleared, chain, top: topRow(g), pairs: pairs(g) };
+}
+/** Same gems side by side: more pairs now means more matches later. */
+function pairs(g) {
+  let n = 0;
+  for (let r = 0; r < CONFIG.rows; r++) for (let c = 0; c < CONFIG.cols; c++) if (isGem(g[r][c])) n += (g[r][c + 1] === g[r][c]) + (g[r + 1]?.[c] === g[r][c]);
+  return n;
+}
+/** Try every swap; keep the ones that pop gems, lower the stack or line gems up; usually play the best. */
+function planBot(B, mistake) {
+  const moves = [], top0 = topRow(B.grid), pairs0 = pairs(B.grid), panic = top0 <= 2 ? 3 : 1;
+  for (let r = 0; r < CONFIG.rows; r++) for (let c = 0; c < CONFIG.cols; c++) for (const [dr, dc] of [[0, 1], [1, 0]]) {
+    if (!canSwap(B, r, c, r + dr, c + dc) || B.grid[r][c] === B.grid[r + dr][c + dc]) continue;
+    const s = simulate(B.grid, r, c, r + dr, c + dc);
+    const score = s.cleared + (s.chain - 1) * 4 + (s.top - top0) * 1.5 * panic + (s.pairs - pairs0) * 0.3 + Math.random() * 0.3;
+    if (s.cleared || s.top > top0 || s.pairs > pairs0) moves.push({ r, c, r2: r + dr, c2: c + dc, score });
+  }
+  moves.sort((a, b) => b.score - a.score);
+  return (Math.random() < mistake && moves[1 + Math.floor(Math.random() * 3)]) || moves[0] || null;
+}
+/** Think, rest the cursor on the gem a moment, then swap. */
+function steerBot(bot, now) {
+  const B = bot.B;
+  if (B.phase !== "idle" || now < bot.nextAt) return;
+  if (!bot.plan) {
+    bot.plan = planBot(B, bot.mistake);
+    if (!bot.plan) { bot.nextAt = now + CONFIG.botThinkMs * 0.5; return; }
+    Object.assign(bot.plan, { k: B.k, at: now + CONFIG.botAimMs });
+    B.cur = [bot.plan.r, bot.plan.c];
+    return;
+  }
+  if (now < bot.plan.at) return;
+  const p = bot.plan, d = B.k - p.k; // the stack may have risen since it looked
+  bot.plan = null; bot.nextAt = now + CONFIG.botThinkMs * (0.6 + Math.random() * 0.8);
+  swap(B, p.r - d, p.c, p.r2 - d, p.c2, now);
+}
+function botsTick(m, t, dt) {
+  const riseMs = riseMsAt(m);
+  for (const [id, bot] of host.bots) {
+    if (!bot.B.alive || m.out.includes(id)) continue;
+    steerBot(bot, t);
+    const res = stepBoard(bot.B, t, dt, riseMs);
+    if (res) afterStep(m, id, bot.B, res);
+  }
+}
+function writeBots() {
+  const now = performance.now(), m = match();
+  if (now - host.lastBots < 110 || !m) return; // ~9/s, and only when a bot board changed
+  host.lastBots = now;
+  const raw = JSON.stringify([...host.bots].map(([i, bot]) => ({ i, ...JSON.parse(packBoard(bot.B, m.id)) })));
+  if (raw !== host.botsRaw) { host.botsRaw = raw; net.setShared("bots", raw); }
+}
+
+// ── ME ──────────────────────────────────────────────────────────────────────────────
+const me = { m: 0, B: null, sent: "", lastSend: 0, sel: null, queued: null, kb: false, grab: false };
+let myName = "", myColor = COLORS[0];
+try { myName = localStorage.getItem("mpa-name") || ""; } catch {}
+if (!myName) myName = ["Ace", "Pip", "Nova", "Ziggy", "Maple", "Taco"][Math.floor(Math.random() * 6)] + " " + (10 + Math.floor(Math.random() * 90));
+
+function myTick(m, t, dt) {
+  if (m.id !== me.m) { me.m = m.id; me.B = m.players.includes(net.sessionId) ? newBoard(m.seed) : null; me.sel = me.queued = null; if (me.B) me.B.cur = [5, 3]; publish(true); }
+  const B = me.B;
+  if (!B || m.ph !== "play" || !B.alive || m.out.includes(net.sessionId)) return publish(false);
+  if (me.queued && B.phase === "idle") { const q = me.queued; me.queued = null; if (t - q.at < 500) doSwap(q.r - (B.k - q.k), q.c, q.r2 - (B.k - q.k), q.c2); }
+  const k = B.k, res = stepBoard(B, t, dt, riseMsAt(m));
+  if (B.k !== k && me.sel) me.sel = [me.sel[0] - 1, me.sel[1]];
+  if (res) afterStep(m, net.sessionId, B, res);
+  if (B.grace > 0 && Math.floor(B.grace / 400) !== Math.floor((B.grace - dt * 1000) / 400)) tone(880, 80, "square", 0.03); // danger beeps
+  publish(false);
+}
+/** After any board does something: sounds, effects, cancelling and sending stones. */
+function afterStep(m, id, B, res) {
+  const mine = id === net.sessionId, now = performance.now();
+  if (res.matched && mine) tone(520 * 1.19 ** (res.chain - 1), 140, "triangle");
+  if (res.popped) {
+    fx.pops.push({ id, cells: res.popped, at: now });
+    if (res.chain >= 2) fx.texts.push({ id, text: `Chain ×${res.chain}!`, color: "#ffd23f", at: now });
+    else if (res.count >= 4) fx.texts.push({ id, text: `${res.count} gems!`, color: "#80ed99", at: now });
+    let send = res.send;
+    while (send > 0 && B.pending.length) { const p = B.pending[0], k = Math.min(p.n, send); p.n -= k; send -= k; if (!p.n) B.pending.shift(); } // your stones cancel theirs first
+    if (send > 0) { B.sent += send; attack(m, id, send); }
+    if (mine) { tone(700 * 1.19 ** (res.chain - 1), 180, "sine", 0.05); if (res.chain >= 2) fx.shake = 6; }
+  }
+  if (res.junk && mine) { fx.shake = Math.max(fx.shake, 9); tone(90, 240, "square", 0.05); }
+  if (res.ko) { fx.texts.push({ id, text: "KO", color: "#ff5a6e", at: now }); if (mine) tone(110, 700, "sawtooth", 0.07); }
+  if (mine) publish(true);
+}
+function publish(force) {
+  const now = performance.now(), m = match();
+  if (!m || (!force && now - me.lastSend < 66)) return; // ~15/s at most
+  const v = me.B ? packBoard(me.B, m.id, me.sel || (me.kb ? me.B.cur : null)) : JSON.stringify({ m: m.id, a: 0 });
+  if (v === me.sent) return;
+  me.sent = v; me.lastSend = now;
+  net.me.set("b", v);
+}
+const canPlay = () => { const m = match(); return !ATTRACT && m && m.ph === "play" && me.B && me.B.alive && me.m === m.id; };
+/** My swap: now if the board is still, or queued for a moment if gems are still moving. */
+function doSwap(r, c, r2, c2) {
+  if (!canPlay()) return false;
+  const B = me.B, t = performance.now();
+  if (B.phase !== "idle") { me.queued = { r, c, r2, c2, k: B.k, at: t }; return true; }
+  if (!swap(B, r, c, r2, c2, t)) { tone(200, 60, "square", 0.02); return false; }
+  tone(620, 40, "sine", 0.03);
+  publish(true);
+  return true;
+}
+
+// ── RIVALS ──────────────────────────────────────────────────────────────────────────
+// Other players' boards (and, on non-hosts, the bots') arrive as snapshots ~10–15 times a
+// second. Each one is rebuilt here into a board-like view, and the change from the last
+// snapshot becomes animation: gems that dropped fall, new ones pop in, popped ones burst.
+const rivals = new Map();
+function rivalBoard(id, v, now) {
+  let R = rivals.get(id);
+  if (!R || R.m !== v.m) { R = { m: v.m, src: null, grid: unpackGrid(v.g), mv: noMoves(), rise: +v.r || 0, next: [...String(v.n || "")], k: v.k || 0, chain: 0 }; rivals.set(id, R); }
+  if (R.src !== v) { applySnapshot(id, R, v, now); R.src = v; }
+  return R;
+}
+function applySnapshot(id, R, v, now) {
+  const g = unpackGrid(v.g), d = Math.max(0, (v.k || 0) - R.k), C = CONFIG.cols, popped = [];
+  const old = [...R.grid.slice(d), ...(d === 1 ? [R.next] : [])], oldMv = R.mv.slice(d);
+  while (old.length < CONFIG.rows) old.push(emptyRow());
+  if (d) R.rise -= d; // keep the rise continuous across a new row
+  const mv = noMoves();
+  for (let c = 0; c < C; c++) {
+    const was = [];
+    for (let r = CONFIG.rows - 1; r >= 0; r--) if (old[r][c] && old[r][c] !== ".") was.push({ r, ch: old[r][c] });
+    let p = 0;
+    for (let r = CONFIG.rows - 1; r >= 0; r--) {
+      const ch = g[r][c];
+      if (ch === ".") continue;
+      while (p < was.length && was[p].ch !== ch && isPopping(was[p].ch)) popped.push([was[p].r, c, was[p++].ch.toLowerCase()]);
+      if (p < was.length && was[p].ch.toLowerCase() === ch.toLowerCase()) { mv[r][c] = was[p].r < r ? { ox: 0, oy: was[p].r - r, t0: now, dur: CONFIG.fallMs * 3, fall: true } : oldMv[was[p].r]?.[c] || null; p++; }
+      else { mv[r][c] = { pop: true, t0: now, dur: 200 }; if (p < was.length) p++; }
+    }
+    for (; p < was.length; p++) if (isPopping(was[p].ch)) popped.push([was[p].r, c, was[p].ch.toLowerCase()]);
+  }
+  if (popped.length) fx.pops.push({ id, cells: popped, at: now });
+  if ((v.c || 0) >= 2 && v.c !== R.chain) fx.texts.push({ id, text: `Chain ×${v.c}!`, color: "#ffd23f", at: now });
+  Object.assign(R, { grid: g, mv, k: v.k || 0, next: [...String(v.n || "")], target: +v.r || 0, alive: !!v.a, score: v.s || 0, sent: v.j || 0, q: v.q || 0, chain: v.c || 0, cur: v.u || null });
+}
+
+// ── DRAW ────────────────────────────────────────────────────────────────────────────
+const $ = (id) => document.getElementById(id);
+const cv = $("game"), ctx = cv.getContext("2d");
+let W = 0, H = 0, DPR = 1, SAFE_TOP = 0;
+function fit() { DPR = Math.min(2, devicePixelRatio || 1); W = innerWidth; H = innerHeight; cv.width = W * DPR; cv.height = H * DPR; SAFE_TOP = parseFloat(getComputedStyle($("safe")).paddingTop) || 0; sprites.clear(); }
+const sprites = new Map();
+addEventListener("resize", fit); addEventListener("orientationchange", fit); fit();
+const fx = { pops: [], attacks: [], parts: [], texts: [], shake: 0, spots: new Map() };
+
+function shapePath(g, shape, cx, cy, r) {
+  const poly = (n, rad, a0, ox = 0, oy = 0) => Array.from({ length: n }, (_, i) => [cx + ox + Math.cos(a0 + (i * 2 * Math.PI) / n) * rad, cy + oy + Math.sin(a0 + (i * 2 * Math.PI) / n) * rad]);
+  g.beginPath();
+  if (shape === "circle") { g.arc(cx, cy, r, 0, Math.PI * 2); return; }
+  if (shape === "square") { g.roundRect(cx - r * 0.86, cy - r * 0.86, r * 1.72, r * 1.72, r * 0.34); return; }
+  const pts = shape === "triangle" ? poly(3, r * 1.15, -Math.PI / 2, 0, r * 0.16)
+    : shape === "diamond" ? [[cx, cy - r * 1.08], [cx + r * 0.86, cy], [cx, cy + r * 1.08], [cx - r * 0.86, cy]]
+    : shape === "hexagon" ? poly(6, r * 1.02, 0)
+    : Array.from({ length: 10 }, (_, i) => { const a = -Math.PI / 2 + (i * Math.PI) / 5, rr = i % 2 ? r * 0.5 : r * 1.1; return [cx + Math.cos(a) * rr, cy + Math.sin(a) * rr]; });
+  pts.forEach(([x, y], i) => (i ? g.lineTo(x, y) : g.moveTo(x, y)));
+  g.closePath();
+}
+/** A gem or stone picture at this size, drawn once and reused. */
+function sprite(ch, size) {
+  const key = ch + Math.round(size);
+  if (sprites.has(key)) return sprites.get(key);
+  const c = document.createElement("canvas"), px = Math.max(4, Math.round(size * DPR)), g = c.getContext("2d");
+  c.width = c.height = px;
+  if (ch === "#") {
+    g.beginPath(); g.roundRect(px * 0.06, px * 0.06, px * 0.88, px * 0.88, px * 0.16);
+    const gr = g.createLinearGradient(0, 0, 0, px); gr.addColorStop(0, "#8f8aae"); gr.addColorStop(1, "#4a4667");
+    g.fillStyle = gr; g.fill(); g.lineWidth = px * 0.05; g.strokeStyle = "#2b2944"; g.stroke();
+    g.strokeStyle = "#34314f"; g.lineWidth = px * 0.04; g.lineCap = "round"; g.beginPath();
+    g.moveTo(px * 0.28, px * 0.22); g.lineTo(px * 0.46, px * 0.46); g.lineTo(px * 0.36, px * 0.74); g.moveTo(px * 0.46, px * 0.46); g.lineTo(px * 0.74, px * 0.56); g.stroke();
+    g.fillStyle = "#ffffff30"; g.fillRect(px * 0.14, px * 0.12, px * 0.72, px * 0.07);
+  } else {
+    const G = GEMS[ch], r = px * 0.4, cx = px / 2, cy = px / 2;
+    shapePath(g, G.shape, cx, cy, r);
+    const gr = g.createRadialGradient(cx - r * 0.35, cy - r * 0.45, r * 0.08, cx, cy, r * 1.2);
+    gr.addColorStop(0, "#ffffff"); gr.addColorStop(0.28, G.color); gr.addColorStop(1, G.dark);
+    g.fillStyle = gr; g.fill(); g.lineWidth = Math.max(1, px * 0.045); g.strokeStyle = G.dark; g.stroke();
+    shapePath(g, G.shape, cx, cy + r * 0.05, r * 0.52); g.fillStyle = "#ffffff26"; g.fill();
+    g.beginPath(); g.ellipse(cx - r * 0.28, cy - r * 0.42, r * 0.3, r * 0.14, -0.5, 0, Math.PI * 2); g.fillStyle = "#ffffffa0"; g.fill();
+  }
+  sprites.set(key, c);
+  return c;
+}
+const easeOut = (p) => 1 - (1 - p) ** 3;
+const easeBack = (p) => 1 + 2.7 * (p - 1) ** 3 + 1.7 * (p - 1) ** 2;
+/** Where a cell's gem is drawn right now: [dx, dy] in cells and a scale. */
+function cellAnim(mv, now) {
+  if (!mv) return [0, 0, 1];
+  const p = Math.max(0, Math.min(1, (now - mv.t0) / mv.dur));
+  if (mv.pop) return [0, 0, 0.3 + 0.7 * easeBack(p)];
+  const e = mv.fall ? p * p : easeOut(p);
+  return [mv.ox * (1 - e), mv.oy * (1 - e), 1];
+}
+
+/** Everyone's board as this client sees it: mine and (on the host) the bots' live, the rest from snapshots. */
+function boardViews(m, now) {
+  const ps = S.entities.players || {}, botViews = isHost() ? null : new Map(cached("bots", S.shared.bots, []).map((v) => [v.i, v]));
+  return m.players.map((id) => {
+    let V = null, v = null;
+    if (id === net.sessionId && me.B && me.m === m.id) V = me.B;
+    else if (isBot(m, id) && !botViews) V = host.bots.get(id)?.B || null;
+    else v = isBot(m, id) ? botViews.get(id) : cached("b:" + id, ps[id]?.b, null);
+    if (!V && v && v.m === m.id && v.g) V = rivalBoard(id, v, now);
+    return { id, name: nameOf(m, id), color: colorOf(m, id), V, out: m.out.includes(id) };
+  });
+}
+/** Where each board goes: mine big, rivals small beside it (or above it on a tall screen). */
+function layout(views) {
+  const mine = views.find((v) => v.id === net.sessionId && !ATTRACT) || views[0], others = views.filter((v) => v !== mine), n = Math.max(1, others.length);
+  const C = CONFIG.cols, R = CONFIG.rows, spots = new Map();
+  if (W >= H * 0.95) {
+    const big = Math.floor(Math.min((H - 140) / R, (W * 0.44) / C)), bw = big * C, room = W - bw - 130;
+    const small = Math.floor(Math.min((room - 26 * n) / (n * C), (H * 0.62) / R, big * 0.62)), total = bw + 90 + n * (small * C + 26) - 26;
+    const x0 = Math.round((W - total) / 2);
+    spots.set(mine.id, { x: x0, y: Math.round((H - big * R) / 2) + 12, cell: big, big: true });
+    others.forEach((v, i) => spots.set(v.id, { x: x0 + bw + 90 + i * (small * C + 26), y: Math.round(H / 2 - (small * R) / 2), cell: small }));
+  } else {
+    const small = Math.floor(Math.min((W - 32 - 18 * (n - 1)) / (n * C), (H * 0.19) / R)), top = SAFE_TOP + 30;
+    const big = Math.floor(Math.min((W - 44) / C, (H - top - small * R - 160) / R));
+    others.forEach((v, i) => spots.set(v.id, { x: Math.round((W - (n * small * C + (n - 1) * 18)) / 2 + i * (small * C + 18)), y: top, cell: small }));
+    spots.set(mine.id, { x: Math.round((W - big * C) / 2), y: top + small * R + 62, cell: big, big: true });
+  }
+  return spots;
+}
+function drawBoard(view, sp, now, mineBig) {
+  const { V, color } = view, C = CONFIG.cols, R = CONFIG.rows, s = sp.cell, w = C * s, h = R * s;
+  let { x, y } = sp;
+  const danger = V && V.alive && !view.out && (V.grid[0].some((ch) => ch !== ".") || V.grid[1].some((ch) => ch !== "."));
+  if (mineBig && fx.shake > 0.5) { x += (Math.random() - 0.5) * fx.shake; y += (Math.random() - 0.5) * fx.shake; }
+  if (danger && (V.grace > 0 || V.rise > 0.97)) { x += (Math.random() - 0.5) * s * 0.08; }
+  const pad = sp.big ? 6 : 3, pulse = danger ? 0.5 + 0.5 * Math.sin(now / 110) : 0;
+  ctx.fillStyle = "#161230"; ctx.beginPath(); ctx.roundRect(x - pad, y - pad, w + pad * 2, h + pad * 2, s * 0.25); ctx.fill();
+  ctx.lineWidth = sp.big ? 3 : 2; ctx.strokeStyle = danger ? `rgba(255,70,90,${0.5 + pulse * 0.5})` : color; ctx.stroke();
+  if (danger) { ctx.fillStyle = `rgba(255,60,80,${0.06 + pulse * 0.08})`; ctx.fillRect(x, y, w, s * 2); }
+  ctx.fillStyle = "#ffffff08";
+  for (let i = 0; i < C; i += 2) ctx.fillRect(x + i * s, y, s, h); // column stripes
+  if (V) {
+    const oy = -V.rise * s;
+    ctx.save(); ctx.beginPath(); ctx.rect(x - pad, y - s * 1.1, w + pad * 2, h + s * 1.1 + pad); ctx.clip();
+    if (V.next && V.next.length) { ctx.globalAlpha = 0.32; V.next.forEach((ch, c) => { if (GEMS[ch]) ctx.drawImage(sprite(ch, s), x + c * s, y + h + oy, s, s); }); ctx.globalAlpha = 1; }
+    for (let r = 0; r < R; r++) for (let c = 0; c < C; c++) {
+      const ch = V.grid[r][c];
+      if (ch === ".") continue;
+      const [dx, dy, sc] = cellAnim(V.mv[r][c], now), px = x + (c + dx) * s, py = y + (r + dy) * s + oy;
+      if (isPopping(ch)) {
+        const k = 1 + 0.14 * Math.sin(now / 40);
+        ctx.drawImage(sprite(ch.toLowerCase(), s), px + (s * (1 - k)) / 2, py + (s * (1 - k)) / 2, s * k, s * k);
+        ctx.globalAlpha = 0.35 + 0.35 * Math.sin(now / 35); ctx.fillStyle = "#fff"; ctx.beginPath(); ctx.roundRect(px + s * 0.1, py + s * 0.1, s * 0.8, s * 0.8, s * 0.25); ctx.fill(); ctx.globalAlpha = 1;
+      } else ctx.drawImage(sprite(ch, s), px + (s * (1 - sc)) / 2, py + (s * (1 - sc)) / 2, s * sc, s * sc);
+    }
+    const cur = view.id === net.sessionId && !ATTRACT ? (me.sel || (me.kb ? V.cur : null)) : V.cur;
+    if (cur && V.alive && !view.out) {
+      ctx.strokeStyle = view.id === net.sessionId ? "#ffffff" : color; ctx.lineWidth = Math.max(1.5, s * 0.08);
+      ctx.beginPath(); ctx.roundRect(x + cur[1] * s + 1, y + cur[0] * s + oy + 1, s - 2, s - 2, s * 0.22); ctx.stroke();
+      if (view.id === net.sessionId && me.grab) { ctx.fillStyle = "#ffffff22"; ctx.fill(); }
+    }
+    ctx.restore();
+  }
+  const q = V ? (V.pending ? waiting(V) : V.q || 0) : 0;
+  if (q > 0) { // stones on their way
+    const ss = Math.max(6, s * 0.42), shown = Math.min(q, 7);
+    for (let i = 0; i < shown; i++) ctx.drawImage(sprite("#", ss), x + w - (i + 1) * (ss + 2), y - pad - ss - 4 + Math.sin(now / 90 + i) * 1.5, ss, ss);
+    ctx.fillStyle = "#ff5a6e"; ctx.font = `800 ${sp.big ? 14 : 10}px system-ui, sans-serif`; ctx.textAlign = "right";
+    ctx.fillText(`+${q}`, x + w - shown * (ss + 2) - 4, y - pad - 6);
+  }
+  ctx.textAlign = "left"; ctx.fillStyle = color; ctx.font = `800 ${sp.big ? 16 : 11}px system-ui, sans-serif`;
+  if (!(q > 0) || sp.big) ctx.fillText(view.id === net.sessionId ? "You" : view.name, x, y - pad - (sp.big ? 10 : 6));
+  ctx.fillStyle = "#cfc8f5"; ctx.font = `600 ${sp.big ? 13 : 10}px system-ui, sans-serif`; ctx.textAlign = "center";
+  ctx.fillText(`${V ? V.score : 0} pts${sp.big ? ` · ${V ? V.sent : 0} stones sent` : ""}`, x + w / 2, y + h + pad + (sp.big ? 18 : 12));
+  if (view.out || (V && !V.alive)) {
+    ctx.fillStyle = "#0c0a1dbb"; ctx.fillRect(x - pad, y - pad, w + pad * 2, h + pad * 2);
+    ctx.fillStyle = "#ff5a6e"; ctx.font = `900 ${Math.max(16, s * 1.6)}px system-ui, sans-serif`; ctx.fillText("KO", x + w / 2, y + h / 2 + s * 0.5);
+  }
+}
+function drawBackground(now) {
+  const grd = ctx.createLinearGradient(0, 0, 0, H); grd.addColorStop(0, "#1d1250"); grd.addColorStop(1, "#0a0818");
+  ctx.fillStyle = grd; ctx.fillRect(0, 0, W, H);
+  for (let i = 0; i < 36; i++) { // slow rising sparkles
+    const x = ((i * 0.6180339) % 1) * W, y = H - ((((i * 0.37) % 1) * H + now * (0.008 + (i % 5) * 0.003)) % (H + 20)), a = 0.15 + 0.15 * Math.sin(now / 600 + i);
+    ctx.fillStyle = `rgba(200,180,255,${a})`; ctx.fillRect(x, y, 2, 2);
+  }
+}
+function draw(m, now, dt) {
+  ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  drawBackground(now);
+  if (!m) return;
+  const views = boardViews(m, now), spots = layout(views);
+  fx.spots = spots;
+  for (const view of views) {
+    const V = view.V;
+    if (V && V.target !== undefined) V.rise = Math.abs(V.target - V.rise) > 0.5 ? V.target : V.rise + (V.target - V.rise) * Math.min(1, dt * 12);
+    drawBoard(view, spots.get(view.id), now, view.id === net.sessionId);
+  }
+  for (const p of fx.pops) { // popped gems burst into shards
+    const sp = spots.get(p.id), V = views.find((v) => v.id === p.id)?.V;
+    if (sp) for (const [r, c, ch] of p.cells) for (let i = 0; i < (sp.big ? 7 : 3); i++) fx.parts.push({ x: sp.x + (c + 0.5) * sp.cell, y: sp.y + (r + 0.5 - (V ? V.rise : 0)) * sp.cell, vx: (Math.random() - 0.5) * (sp.big ? 380 : 160), vy: -Math.random() * (sp.big ? 320 : 140), life: 1, c: GEMS[ch]?.color || "#fff", s: sp.big ? 5 : 3 });
+  }
+  fx.pops = [];
+  for (const a of fx.attacks) { // stones flying from one board to another
+    const k = (now - a.at) / 520, from = spots.get(a.from), to = spots.get(a.to);
+    if (k > 1 || !from || !to) continue;
+    const fxp = from.x + (from.cell * CONFIG.cols) / 2, fyp = from.y + from.cell * 4, tx = to.x + (to.cell * CONFIG.cols) / 2, ty = to.y;
+    const px = fxp + (tx - fxp) * easeOut(k), py = fyp + (ty - fyp) * k - Math.sin(k * Math.PI) * 90, ss = 16;
+    for (let i = 0; i < Math.min(6, a.n); i++) ctx.drawImage(sprite("#", ss), px - ss / 2 + i * 5 - 12, py - ss / 2 - i * 5, ss, ss);
+    if (k > 0.92 && !a.hit) { a.hit = true; for (let i = 0; i < 10; i++) fx.parts.push({ x: tx, y: ty, vx: (Math.random() - 0.5) * 300, vy: -Math.random() * 250, life: 1, c: "#9a95b8", s: 4 }); }
+  }
+  for (let i = fx.parts.length - 1; i >= 0; i--) {
+    const p = fx.parts[i]; p.life -= dt * 1.6; p.vy += 900 * dt; p.x += p.vx * dt; p.y += p.vy * dt;
+    if (p.life <= 0) { fx.parts.splice(i, 1); continue; }
+    ctx.globalAlpha = p.life; ctx.fillStyle = p.c; ctx.fillRect(p.x - p.s / 2, p.y - p.s / 2, p.s, p.s);
+  }
+  ctx.globalAlpha = 1;
+  for (const t of fx.texts) { // "Chain ×2!" over the board that did it
+    const sp = spots.get(t.id), k = (now - t.at) / 1000;
+    if (!sp || k > 1) continue;
+    const size = Math.max(14, sp.cell * (sp.big ? 0.75 : 0.9)) * (k < 0.15 ? 0.6 + k * 2.7 : 1);
+    ctx.globalAlpha = 1 - k * k; ctx.font = `900 ${size}px system-ui, sans-serif`; ctx.textAlign = "center"; ctx.lineWidth = 5; ctx.strokeStyle = "#0c0a1d";
+    const tx = sp.x + (sp.cell * CONFIG.cols) / 2, ty = sp.y + sp.cell * CONFIG.rows * 0.42 - k * 40;
+    ctx.strokeText(t.text, tx, ty); ctx.fillStyle = t.color; ctx.fillText(t.text, tx, ty);
+  }
+  ctx.globalAlpha = 1;
+  fx.attacks = fx.attacks.filter((a) => now - a.at < 600); fx.texts = fx.texts.filter((t) => now - t.at < 1000); fx.shake *= 0.86;
+  const t = Date.now();
+  if (m.ph === "count") { const n = Math.ceil((m.startAt - t) / 1000); big(n > 0 ? String(n) : "GO!", "#ffd23f"); }
+  else if (m.ph === "play" && t - m.startAt < 700) big("GO!", "#80ed99");
+  else if (m.ph === "play" && !m.players.includes(net.sessionId) && !ATTRACT) big("Watching", "#cfc8f5", "You'll play in the next match", 36, SAFE_TOP + 60);
+}
+function big(text, color, sub, size = Math.min(96, W * 0.16), y = H * 0.45) {
+  ctx.textAlign = "center"; ctx.font = `900 ${size}px system-ui, sans-serif`;
+  ctx.lineWidth = 8; ctx.strokeStyle = "#0c0a1d"; ctx.strokeText(text, W / 2, y); ctx.fillStyle = color; ctx.fillText(text, W / 2, y);
+  if (sub) { ctx.font = "700 15px system-ui, sans-serif"; ctx.strokeStyle = "#0c0a1d"; ctx.lineWidth = 4; ctx.strokeText(sub, W / 2, y + 26); ctx.fillStyle = "#fff"; ctx.fillText(sub, W / 2, y + 26); }
+}
+
+// ── SCREENS ─────────────────────────────────────────────────────────────────────────
+const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
+let AC = null;
+function unlockAudio() { if (!AC && !ATTRACT) try { AC = new AudioContext(); } catch {} }
+function tone(f, ms, type = "sine", vol = 0.05) {
+  if (!AC) return;
+  const o = AC.createOscillator(), gn = AC.createGain(), t = AC.currentTime;
+  o.type = type; o.frequency.value = f; gn.gain.setValueAtTime(vol, t); gn.gain.exponentialRampToValueAtTime(0.0001, t + ms / 1000);
+  o.connect(gn).connect(AC.destination); o.start(t); o.stop(t + ms / 1000);
+}
+let overFor = -1, board = null;
+function hud(m) {
+  const n = humans().length;
+  $("net").textContent = ATTRACT ? "" : net.offline ? "Offline: playing with bots" : `Online · ${n} player${n === 1 ? "" : "s"}${isHost() ? " · you run the match" : ""}`;
+  if (!m) return;
+  const early = m.ph === "count" || (m.ph === "play" && Date.now() - m.startAt < 14000 && m.id <= 2);
+  $("hint").textContent = ATTRACT || !early ? "" : touchUI ? "Drag a gem onto its neighbor to swap · match 3 · chains drop stones on rivals" : "Drag (or click two) gems to swap · arrows + Space work too · match 3 · chains drop stones on rivals";
+  $("over").hidden = m.ph !== "over" || ATTRACT;
+  if (m.ph !== "over") return;
+  const views = boardViews(m, performance.now()), scoreIn = (id) => views.find((x) => x.id === id)?.V?.score || 0;
+  const rank = (id) => (id === m.winner ? 1e9 : m.out.includes(id) ? m.out.indexOf(id) - 1e6 : scoreIn(id)); // winner, then boards still in, then the last ones out
+  const place = [...m.players].sort((a, b) => rank(b) - rank(a));
+  $("oTitle").textContent = !m.winner ? "Draw!" : m.winner === net.sessionId ? "You win!" : `${nameOf(m, m.winner)} wins!`;
+  const html = place.map((id) => `<li class="${id === net.sessionId ? "me" : ""}">${esc(nameOf(m, id))}<span>${scoreIn(id)} pts</span></li>`).join("");
+  if ($("places").innerHTML !== html) $("places").innerHTML = html;
+  $("oNext").textContent = `Next match in ${Math.max(0, Math.ceil((m.endsAt - Date.now()) / 1000))}s`;
+  $("again").textContent = m.ready.includes(net.sessionId) ? "Ready ✓" : "Play again";
+  if (overFor === m.id) return;
+  overFor = m.id;
+  const list = $("board"), score = me.B && me.m === m.id ? me.B.score : 0;
+  if (m.winner === net.sessionId) tone(660, 400, "triangle", 0.07);
+  if (!board) { list.innerHTML = "<li>Leaderboards need a connection.</li>"; return; }
+  list.innerHTML = "<li>Loading…</li>";
+  (score > 0 ? board.submit(score).catch(() => null) : Promise.resolve()).then(() => board.top(10)).then(({ entries }) => {
+    list.innerHTML = entries.length ? entries.map((e) => `<li>${esc(e.username || "Player")}<span>${e.score}</span></li>`).join("") : "<li>No scores yet. Make a chain!</li>";
+  }).catch(() => { list.innerHTML = "<li>Couldn't load the leaderboard.</li>"; });
+}
+$("again").addEventListener("click", () => { if (isHost()) onReady(net.sessionId); else net.send("ready", { r: 1 }); });
+
+/** Two players picked one color (they joined at once), or a bot has mine: the later sessionId picks another. */
+function fixColor() {
+  const ps = S.entities.players || {}, m = match(), botColors = (m?.bots || []).map((b) => b.c);
+  if (!Object.entries(ps).some(([id, p]) => id < net.sessionId && p.c === myColor) && !botColors.includes(myColor)) return;
+  const taken = new Set([...Object.entries(ps).filter(([id]) => id !== net.sessionId).map(([, p]) => p.c), ...botColors]);
+  myColor = COLORS.find((c) => !taken.has(c)) || myColor;
+  net.me.set("c", myColor);
+}
+
+// ── INPUT ───────────────────────────────────────────────────────────────────────────
+const touchUI = matchMedia("(pointer: coarse)").matches;
+/** The cell of my board under the pointer, through the same layout and rise the frame was drawn with. */
+function cellAt(e) {
+  const sp = fx.spots.get(net.sessionId), B = me.B;
+  if (!sp || !B) return null;
+  const c = Math.floor((e.clientX - sp.x) / sp.cell), r = Math.floor((e.clientY - (sp.y - B.rise * sp.cell)) / sp.cell);
+  return r >= 0 && c >= 0 && r < CONFIG.rows && c < CONFIG.cols ? [r, c] : null;
+}
+const drag = { id: -1, at: null, x: 0, y: 0, done: false, prev: null };
+cv.addEventListener("pointerdown", (e) => {
+  e.preventDefault(); unlockAudio(); me.kb = false; me.grab = false;
+  const at = cellAt(e);
+  if (!at || !canPlay()) return;
+  Object.assign(drag, { id: e.pointerId, at, x: e.clientX, y: e.clientY, done: false, prev: me.sel });
+  me.sel = at; cv.setPointerCapture(e.pointerId);
+});
+cv.addEventListener("pointermove", (e) => {
+  if (e.pointerId !== drag.id || drag.done) return;
+  const step = (fx.spots.get(net.sessionId)?.cell || 40) * 0.42, dx = e.clientX - drag.x, dy = e.clientY - drag.y;
+  if (Math.max(Math.abs(dx), Math.abs(dy)) < step) return;
+  const [r, c] = drag.at, [dr, dc] = Math.abs(dx) > Math.abs(dy) ? [0, Math.sign(dx)] : [Math.sign(dy), 0];
+  drag.done = true; me.sel = null;
+  doSwap(r, c, r + dr, c + dc);
+});
+cv.addEventListener("pointerup", (e) => {
+  if (e.pointerId !== drag.id) return;
+  drag.id = -1;
+  if (drag.done) return;
+  const [r, c] = drag.at, p = drag.prev; // a tap: pick a gem, then tap a neighbor to swap
+  if (p && Math.abs(p[0] - r) + Math.abs(p[1] - c) === 1) { me.sel = null; doSwap(p[0], p[1], r, c); }
+  else if (p && p[0] === r && p[1] === c) me.sel = null;
+});
+cv.addEventListener("pointercancel", () => { drag.id = -1; });
+document.addEventListener("touchmove", (e) => { if (!e.target.closest(".card")) e.preventDefault(); }, { passive: false });
+// Keyboard: arrows move a cursor; Space picks the gem up; an arrow then swaps it that way.
+const DIRS = { ArrowLeft: [0, -1], a: [0, -1], ArrowRight: [0, 1], d: [0, 1], ArrowUp: [-1, 0], w: [-1, 0], ArrowDown: [1, 0], s: [1, 0] };
+addEventListener("keydown", (e) => {
+  const key = e.key.length === 1 ? e.key.toLowerCase() : e.key, dir = DIRS[key];
+  if (!dir && key !== " " && key !== "Enter") return;
+  e.preventDefault(); unlockAudio();
+  if (!canPlay()) return;
+  const B = me.B; me.kb = true; me.sel = null;
+  if (!B.cur) B.cur = [5, 3];
+  if (!dir) { me.grab = !me.grab; return; }
+  const [r, c] = B.cur, r2 = Math.max(0, Math.min(CONFIG.rows - 1, r + dir[0])), c2 = Math.max(0, Math.min(CONFIG.cols - 1, c + dir[1]));
+  if (me.grab) { me.grab = false; if (doSwap(r, c, r2, c2)) B.cur = [r2, c2]; }
+  else B.cur = [r2, c2];
+  publish(false);
+});
+
+// ── MAIN LOOP ───────────────────────────────────────────────────────────────────────
+let lastHb = 0, lastHud = 0, last = 0;
+function frame() {
+  const t = performance.now(), dt = Math.max(0, Math.min(0.05, (t - (last || t)) / 1000));
+  last = t;
+  if (t - lastHb > 1000) { lastHb = t; net.me.set("hb", Date.now()); fixColor(); }
+  if (isHost()) hostTick(Date.now(), t, dt); else host.was = false;
+  const m = match();
+  if (m) myTick(m, t, dt);
+  draw(m, t, dt);
+  if (t - lastHud > 150) { lastHud = t; hud(m); }
+  requestAnimationFrame(frame);
+}
+
+(async function start() {
+  if (ATTRACT) Object.assign(CONFIG, { countdownMs: 200, startRows: 7, riseMs: 1500, speedUpEvery: 6000, botThinkMs: 420, botAimMs: 120, botMistake: 0.25, junkPerChain: 4, junkPerExtra: 2, junkDelayMs: 700, overMs: 3000 });
+  net = await connect();
+  net.onState((st) => { S = st; });
+  net.onDisconnect(() => { $("net").textContent = "Reconnecting…"; });
+  net.onReconnect(() => { lastHud = 0; });
+  net.on("junk", (msg, from) => { const m = match(); if (msg && m && msg.m === m.id) { fx.attacks.push({ from: msg.f || from, to: msg.to, n: msg.n, at: performance.now() }); receiveStones(m, msg.to, Math.max(0, Math.min(CONFIG.maxJunk * 2, msg.n | 0))); } });
+  net.on("ready", (msg, from) => { if (isHost()) onReady(from); });
+  if (!net.offline && typeof MP !== "undefined") board = MP.auth({ key: MP_CONNECT.key, apiUrl: MP_CONNECT.apiUrl }).leaderboard(CONFIG.board);
+  const taken = new Set(Object.entries(S.entities.players || {}).filter(([id]) => id !== net.sessionId).map(([, p]) => p.c));
+  myColor = COLORS.find((c) => !taken.has(c)) || COLORS[Math.floor(Math.random() * COLORS.length)];
+  net.me.set({ n: myName, c: myColor, hb: Date.now() });
+  if (ATTRACT) { // the preview: four bots on tall stacks, so chains and stones start at once
+    writeMatch(newMatch(1)); host.was = true;
+    host.bots.get("bot1").mistake = 0.1; // the big board in the preview plays a little better
+  }
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>

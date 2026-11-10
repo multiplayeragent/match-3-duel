@@ -1,0 +1,21 @@
+{
+  "name": "Match-3 Duel",
+  "genre": "puzzle",
+  "dim": "2D",
+  "mode": "Versus",
+  "players": "2–4",
+  "hook": "Match gems, chain combos, bury rivals in stone.",
+  "how": "Swap gems to line up 3 or more while your stack rises from below. Chains and big matches drop stones on a rival; a board that fills to the top is out. Last board standing wins.",
+  "controls": "Drag a gem onto a neighbor (or click two), arrows + Space work too; on touch, drag a gem",
+  "uses": [
+    ["Live sync", "Every rival's board plays out next to yours, gem by gem."],
+    ["Host-run rounds", "The host's browser runs the match: who is out, the winner and the restart. If it leaves, the next player takes over."],
+    ["Bots", "Bots fill empty seats: they look for chains and send stones like a decent player."],
+    ["Leaderboard", "Each player's best score in one match."]
+  ],
+  "ideas": [
+    "Add a bomb gem that clears its whole row",
+    "Make it a 2-minute high-score race instead",
+    "Turn the gems into candy with a candy-shop look"
+  ]
+}
