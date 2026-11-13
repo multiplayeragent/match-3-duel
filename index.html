@@ -18,6 +18,7 @@
   .card h2 { margin: 0 0 6px; font-size: 26px; }
   .card h3 { margin: 12px 0 0; font-size: 12px; letter-spacing: .1em; color: #a99fd6; }
   .card ol { text-align: left; margin: 8px 0; padding-left: 26px; font-size: 14px; } .card li span { float: right; } .card li.me { color: #ffd23f; font-weight: 700; }
+  .card li.msg { list-style: none; margin-left: -26px; text-align: center; color: #a99fd6; }
   button.go { width: 100%; min-height: 48px; border: 0; border-radius: 12px; background: #ffd23f; color: #1e1840; font: 800 17px system-ui, sans-serif; cursor: pointer; margin-top: 8px; }
   #oNext { color: #a99fd6; font-size: 13px; margin-top: 8px; }
 </style>
@@ -30,7 +31,7 @@
 <div class="hud" id="net">Connecting…</div>
 <div id="over" hidden><div class="card">
   <h2 id="oTitle"></h2><ol id="places"></ol>
-  <h3>BEST SCORE IN ONE MATCH</h3><ol id="board"><li>Loading the leaderboard…</li></ol>
+  <h3>BEST SCORE IN ONE MATCH</h3><ol id="board"><li class="msg">Loading the leaderboard…</li></ol>
   <button class="go" id="again">Play again</button><div id="oNext"></div>
 </div></div>
 <script>
@@ -325,13 +326,13 @@ function writeMatch(m) { m = { ...m, v: (match()?.v ?? 0) + 1 }; host.last = m; 
 const nameOf = (m, id) => (id === net.sessionId ? myName : m?.bots.find((b) => b.i === id)?.n) || String(S.entities.players?.[id]?.n ?? "Player").slice(0, 12);
 const colorOf = (m, id) => (id === net.sessionId ? myColor : m?.bots.find((b) => b.i === id)?.c) || S.entities.players?.[id]?.c || "#aaa";
 const isBot = (m, id) => !!m && m.bots.some((b) => b.i === id);
-const newBot = (B) => ({ B, plan: null, nextAt: 0, mistake: CONFIG.botMistake });
+const newBot = (B, wait = 0) => ({ B, plan: null, nextAt: performance.now() + wait + Math.random() * CONFIG.botThinkMs, mistake: CONFIG.botMistake }); // a random first think, so bots don't all move at once
 
 function newMatch(id) {
   const hs = humans().slice(0, CONFIG.seats), used = new Set(hs.map((h) => colorOf(null, h))), free = COLORS.filter((c) => !used.has(c)), names = [...BOT_NAMES].sort(() => Math.random() - 0.5);
   const bots = Array.from({ length: Math.max(hs.length ? 0 : 1, CONFIG.seats - hs.length) }, (_, k) => ({ i: "bot" + (k + 1), n: names[k], c: free[k % free.length] }));
   const seed = (Math.random() * 1e9) | 0;
-  host.bots = new Map(bots.map((b) => [b.i, newBot(newBoard(seed))]));
+  host.bots = new Map(bots.map((b) => [b.i, newBot(newBoard(seed), CONFIG.countdownMs)]));
   return { id, ph: "count", seed, startAt: Date.now() + CONFIG.countdownMs, players: [...hs, ...bots.map((b) => b.i)], bots, out: [], winner: "", endsAt: 0, ready: [] };
 }
 /** Become host: take the bots' boards over exactly as state has them. */
@@ -454,14 +455,16 @@ function steerBot(bot, now) {
   if (!bot.plan) {
     bot.plan = planBot(B, bot.mistake);
     if (!bot.plan) { bot.nextAt = now + CONFIG.botThinkMs * 0.5; return; }
-    Object.assign(bot.plan, { k: B.k, at: now + CONFIG.botAimMs });
+    Object.assign(bot.plan, { g: B.grid.join(), at: now + CONFIG.botAimMs });
     B.cur = [bot.plan.r, bot.plan.c];
     return;
   }
   if (now < bot.plan.at) return;
-  const p = bot.plan, d = B.k - p.k; // the stack may have risen since it looked
-  bot.plan = null; bot.nextAt = now + CONFIG.botThinkMs * (0.6 + Math.random() * 0.8);
-  swap(B, p.r - d, p.c, p.r2 - d, p.c2, now);
+  const p = bot.plan;
+  bot.plan = null;
+  if (B.grid.join() !== p.g) { bot.nextAt = now + CONFIG.botAimMs; return; } // stones fell or the stack rose since it looked: look again
+  bot.nextAt = now + CONFIG.botThinkMs * (0.6 + Math.random() * 0.8);
+  swap(B, p.r, p.c, p.r2, p.c2, now);
 }
 function botsTick(m, t, dt) {
   const riseMs = riseMsAt(m);
@@ -796,11 +799,11 @@ function hud(m) {
   overFor = m.id;
   const list = $("board"), score = me.B && me.m === m.id ? me.B.score : 0;
   if (m.winner === net.sessionId) tone(660, 400, "triangle", 0.07);
-  if (!board) { list.innerHTML = "<li>Leaderboards need a connection.</li>"; return; }
-  list.innerHTML = "<li>Loading…</li>";
+  if (!board) { list.innerHTML = '<li class="msg">Leaderboards need a connection.</li>'; return; }
+  list.innerHTML = '<li class="msg">Loading…</li>';
   (score > 0 ? board.submit(score).catch(() => null) : Promise.resolve()).then(() => board.top(10)).then(({ entries }) => {
-    list.innerHTML = entries.length ? entries.map((e) => `<li>${esc(e.username || "Player")}<span>${e.score}</span></li>`).join("") : "<li>No scores yet. Make a chain!</li>";
-  }).catch(() => { list.innerHTML = "<li>Couldn't load the leaderboard.</li>"; });
+    list.innerHTML = entries.length ? entries.map((e) => `<li>${esc(e.username || "Player")}<span>${e.score}</span></li>`).join("") : '<li class="msg">No scores yet. Make a chain!</li>';
+  }).catch(() => { list.innerHTML = '<li class="msg">Couldn\'t load the leaderboard.</li>'; });
 }
 $("again").addEventListener("click", () => { if (isHost()) onReady(net.sessionId); else net.send("ready", { r: 1 }); });
 
@@ -847,10 +850,12 @@ cv.addEventListener("pointerup", (e) => {
   else if (p && p[0] === r && p[1] === c) me.sel = null;
 });
 cv.addEventListener("pointercancel", () => { drag.id = -1; });
+cv.addEventListener("contextmenu", (e) => e.preventDefault()); // a right-click on the board doesn't open the browser menu
 document.addEventListener("touchmove", (e) => { if (!e.target.closest(".card")) e.preventDefault(); }, { passive: false });
 // Keyboard: arrows move a cursor; Space picks the gem up; an arrow then swaps it that way.
 const DIRS = { ArrowLeft: [0, -1], a: [0, -1], ArrowRight: [0, 1], d: [0, 1], ArrowUp: [-1, 0], w: [-1, 0], ArrowDown: [1, 0], s: [1, 0] };
 addEventListener("keydown", (e) => {
+  if (e.target.closest?.("button")) return; // Enter / Space on "Play again" press the button
   const key = e.key.length === 1 ? e.key.toLowerCase() : e.key, dir = DIRS[key];
   if (!dir && key !== " " && key !== "Enter") return;
   e.preventDefault(); unlockAudio();
